@@ -1,0 +1,80 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.1.0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4.0.4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Verify Gradle wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f gradlew
+          test -f gradle/wrapper/gradle-wrapper.jar
+          test -f gradle/wrapper/gradle-wrapper.properties
+          chmod +x gradlew
+
+          # Some runner/cache combinations can restore the downloaded Gradle
+          # distribution without its executable bit. Let the wrapper unpack it,
+          # repair the launcher permission if needed, then retry.
+          set +e
+          ./gradlew --version
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            repaired=0
+            while IFS= read -r -d '' gradle_bin; do
+              chmod +x "$gradle_bin"
+              repaired=1
+            done < <(find "$HOME/.gradle/wrapper/dists" -type f -path '*/bin/gradle' -print0 2>/dev/null || true)
+
+            if [ "$repaired" -eq 0 ]; then
+              echo "Gradle wrapper failed and no downloaded Gradle launcher was found to repair."
+              exit "$status"
+            fi
+
+            ./gradlew --version
+          fi
+
+      - name: Run unit tests and build debug APK
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+
+      - name: Verify APK output
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t APKS < <(find app/build/outputs/apk/debug -type f -name '*.apk' -print)
+          test "${#APKS[@]}" -eq 1
+          APK="${APKS[0]}"
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          echo "Found APK: $APK"
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: android-paper-server-debug-apk
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
